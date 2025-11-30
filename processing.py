@@ -37,153 +37,172 @@ class TiltShiftZoneDefiner:
     def __init__(self, shape: Tuple[int, ...], settings: MiniatureSettings):
         self.rows, self.cols = shape[:2]
         self.settings = settings
-        
-        # Geometry Vectors
-        self.theta = np.deg2rad(settings.angle_degree)
         self.cx = int(settings.center_x * self.cols)
         self.cy = int(settings.center_y * self.rows)
-        
-        # Direction (Along the line)
-        self.dir_vec = np.array([np.cos(self.theta), np.sin(self.theta)])
-        # Normal (Perpendicular, pointing to Side A)
-        self.norm_vec = np.array([-np.sin(self.theta), np.cos(self.theta)])
 
-    def compute_mask(self) -> np.ndarray:
+    def _get_vectors(self, angle_deg):
+        """Helper to get direction and normal vectors from an angle."""
+        theta = np.deg2rad(angle_deg)
+        # Normal vector (perpendicular to the cut line)
+        # We assume the 'handle' represents the Normal direction
+        nx = np.cos(theta)
+        ny = np.sin(theta)
+        return nx, ny
+
+    def compute_mask(self, downscale_factor=0.1) -> np.ndarray:
         """
-        Calculates the Asymmetric Alpha Mask.
-        Distinguishes between Positive side (Upper) and Negative side (Lower).
+        Calculates the mask with Downscaling Optimization.
+        Result is upscaled back to original size.
         """
-        X, Y = np.meshgrid(np.arange(self.cols), np.arange(self.rows))
+        # 1. Determine calculation grid size (Low Res)
+        calc_rows = int(self.rows * downscale_factor)
+        calc_cols = int(self.cols * downscale_factor)
         
-        # Signed Distance Calculation
-        # Positive values = Side A, Negative values = Side B
-        signed_dist = (X - self.cx) * self.norm_vec[0] + (Y - self.cy) * self.norm_vec[1]
+        # 2. Scale geometry parameters to low res
+        scale_cx = self.cx * downscale_factor
+        scale_cy = self.cy * downscale_factor
         
-        mask = np.zeros((self.rows, self.cols), dtype=np.float32)
+        X, Y = np.meshgrid(np.arange(calc_cols), np.arange(calc_rows))
         
-        # --- Logic for Side A (Upper, dist > 0) ---
-        sw_up = self.settings.upper_sharp
-        tw_up = self.settings.upper_trans
+        # --- Logic: Intersection of two half-planes ---
         
-        # Pixels on Side A
-        mask_A = (signed_dist >= 0)
-        dist_A = signed_dist[mask_A]
+        # Part A: Upper Boundary
+        # Calculate distance to the Upper Line
+        nx_up, ny_up = self._get_vectors(self.settings.angle_upper)
+        # Project vector from center to pixel onto the normal vector
+        # Dist > 0 means we are "past" the line (into the blur zone)
+        dist_up = (X - scale_cx) * nx_up + (Y - scale_cy) * ny_up
         
-        # 1. Sharp Area A
-        sharp_A = dist_A < sw_up
-        # 2. Transition Area A
-        trans_A = (dist_A >= sw_up) & (dist_A < (sw_up + tw_up))
+        # Part B: Lower Boundary
+        nx_low, ny_low = self._get_vectors(self.settings.angle_lower)
+        dist_low = (X - scale_cx) * nx_low + (Y - scale_cy) * ny_low
         
-        # Fill Mask A
-        # We need to map these boolean indices back to the main mask
-        # This is a bit tricky with numpy boolean indexing, so let's do it per zone.
+        # Initialize Mask as 1.0 (Sharp)
+        mask = np.ones((calc_rows, calc_cols), dtype=np.float32)
         
-        # --- Simplified Logic using np.where for readability ---
-        
-        # 1. Sharp Zone (Both sides)
-        # Upper sharp
-        mask[(signed_dist >= 0) & (signed_dist < sw_up)] = 1.0
-        # Lower sharp (using abs for negative side)
-        sw_low = self.settings.lower_sharp
-        mask[(signed_dist < 0) & (signed_dist > -sw_low)] = 1.0
-        
-        # 2. Transition Zone Upper
-        if tw_up > 0:
-            cond_up = (signed_dist >= sw_up) & (signed_dist < (sw_up + tw_up))
-            mask[cond_up] = 1.0 - (signed_dist[cond_up] - sw_up) / tw_up
+        def apply_decay(dist_field, sharp_lim, trans_lim):
+            # Scale limits to low res
+            s_sharp = sharp_lim * downscale_factor
+            s_trans = trans_lim * downscale_factor
             
-        # 3. Transition Zone Lower
-        tw_low = self.settings.lower_trans
-        if tw_low > 0:
-            # Distance is negative, e.g., -150. abs is 150.
-            abs_dist = -signed_dist
-            cond_low = (signed_dist <= -sw_low) & (signed_dist > -(sw_low + tw_low))
-            mask[cond_low] = 1.0 - (abs_dist[cond_low] - sw_low) / tw_low
+            # Identify pixels that are too far
+            # We only care about positive distance (direction of the handle)
+            cond_trans = (dist_field > s_sharp) & (dist_field < (s_sharp + s_trans))
+            cond_blur = (dist_field >= (s_sharp + s_trans))
             
-        return mask
+            # Apply gradients
+            if s_trans > 0:
+                mask[cond_trans] = np.minimum(mask[cond_trans], 1.0 - (dist_field[cond_trans] - s_sharp) / s_trans)
+            
+            mask[cond_blur] = 0.0
+
+        # Apply constraints from both lines
+        apply_decay(dist_up, self.settings.dist_upper_sharp, self.settings.dist_upper_trans)
+        apply_decay(dist_low, self.settings.dist_lower_sharp, self.settings.dist_lower_trans)
+        
+        # 3. Upscale mask to full resolution (Linear interpolation is fast and smooth enough)
+        full_mask = cv2.resize(mask, (self.cols, self.rows), interpolation=cv2.INTER_LINEAR)
+        return full_mask
 
     def get_handles_pos(self) -> List[Tuple[int, int]]:
-        """
-        Returns two points: [Handle_Upper, Handle_Lower]
-        """
-        # Handle 1: Upper limit (Positive Normal)
-        total_up = self.settings.upper_sharp + self.settings.upper_trans
-        h1x = self.cx + self.norm_vec[0] * total_up
-        h1y = self.cy + self.norm_vec[1] * total_up
+        """Returns positions for drawing handles."""
+        # Handle 1 (Upper)
+        nx_up, ny_up = self._get_vectors(self.settings.angle_upper)
+        dist_up = self.settings.dist_upper_sharp
+        h1 = (int(self.cx + nx_up * dist_up), int(self.cy + ny_up * dist_up))
         
-        # Handle 2: Lower limit (Negative Normal)
-        total_low = self.settings.lower_sharp + self.settings.lower_trans
-        h2x = self.cx - self.norm_vec[0] * total_low
-        h2y = self.cy - self.norm_vec[1] * total_low
+        # Handle 2 (Lower)
+        nx_low, ny_low = self._get_vectors(self.settings.angle_lower)
+        dist_low = self.settings.dist_lower_sharp
+        h2 = (int(self.cx + nx_low * dist_low), int(self.cy + ny_low * dist_low))
         
-        return [(int(h1x), int(h1y)), (int(h2x), int(h2y))]
+        return [h1, h2]
+
+    def get_lines_geometry(self):
+        """Helper to return lines data for drawing."""
+        res = []
+        for (angle, d_sharp, d_trans) in [
+            (self.settings.angle_upper, self.settings.dist_upper_sharp, self.settings.dist_upper_trans),
+            (self.settings.angle_lower, self.settings.dist_lower_sharp, self.settings.dist_lower_trans)
+        ]:
+            nx, ny = self._get_vectors(angle)
+            # Perpendicular vector (for drawing the line across screen)
+            dx, dy = -ny, nx
+            res.append({
+                'norm': (nx, ny),
+                'dir': (dx, dy),
+                'sharp': d_sharp,
+                'total': d_sharp + d_trans
+            })
+        return res
 
 
 def render_composite(img_sharp: np.ndarray, img_blur: np.ndarray, settings: MiniatureSettings) -> np.ndarray:
     definer = TiltShiftZoneDefiner(img_sharp.shape, settings)
-    mask = definer.compute_mask()
+    # Use downscale optimization here!
+    mask = definer.compute_mask(downscale_factor=0.25)
+    
     mask_3ch = cv2.merge([mask, mask, mask])
-    result = (img_sharp * mask_3ch + img_blur * (1 - mask_3ch)).astype("uint8")
-    return result
+    # Fast blending
+    result = img_sharp * mask_3ch + img_blur * (1 - mask_3ch)
+    return result.astype("uint8")
 
 
-def draw_guides_cv2(image: np.ndarray, settings: MiniatureSettings) -> np.ndarray:
-    """Draws asymmetric guides and two handles."""
+def draw_guides_cv2(image: np.ndarray, settings: MiniatureSettings, active_node: str = None) -> np.ndarray:
     overlay = image.copy()
     h, w = overlay.shape[:2]
-    diag = int((h**2 + w**2)**0.5)
+    # Reduce drawing length calculation to avoid overflow issues, just needs to be "long enough"
+    diag = 3000
     
     definer = TiltShiftZoneDefiner((h, w), settings)
     cx, cy = definer.cx, definer.cy
-    nx, ny = definer.norm_vec
-    dx, dy = definer.dir_vec
+    lines = definer.get_lines_geometry()
     
-    def get_line_pts(offset):
-        ox, oy = cx + nx * offset, cy + ny * offset
-        p1 = (int(ox - dx * diag), int(oy - dy * diag))
-        p2 = (int(ox + dx * diag), int(oy + dy * diag))
-        return p1, p2
-
-    def draw_dashed(p1, p2):
-        dist = ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)**0.5
+    # Helper: Draw Dashed Line
+    # Optimized: Draw segments instead of pixel-by-pixel loop for speed
+    def draw_dashed_fast(p1, p2, color, thickness=1, dash=15):
+        vec = np.array(p2) - np.array(p1)
+        dist = np.linalg.norm(vec)
         if dist == 0: return
-        vx, vy = (p2[0]-p1[0])/dist, (p2[1]-p1[1])/dist
-        curr = 0
-        while curr < dist:
-            a = (int(p1[0]+vx*curr), int(p1[1]+vy*curr))
-            b = (int(p1[0]+vx*min(curr+10, dist)), int(p1[1]+vy*min(curr+10, dist)))
-            cv2.line(overlay, a, b, (255, 255, 255), 2)
-            curr += 20
+        unit_vec = vec / dist
+        
+        steps = int(dist / (dash * 2))
+        for i in range(steps):
+            start = np.array(p1) + unit_vec * (i * dash * 2)
+            end = start + unit_vec * dash
+            cv2.line(overlay, tuple(start.astype(int)), tuple(end.astype(int)), color, thickness)
 
-    # --- Upper Side (Positive) ---
-    # Dashed (Sharp Limit)
-    p1, p2 = get_line_pts(settings.upper_sharp)
-    draw_dashed(p1, p2)
-    # Solid (Blur Limit)
-    p1, p2 = get_line_pts(settings.upper_sharp + settings.upper_trans)
-    cv2.line(overlay, p1, p2, (255, 255, 255), 2)
+    # Draw both boundaries (Upper and Lower are independent now)
+    for line_info in lines:
+        nx, ny = line_info['norm']
+        dx, dy = line_info['dir']
+        
+        # Center of the sharp line
+        ox_s, oy_s = cx + nx * line_info['sharp'], cy + ny * line_info['sharp']
+        p1_s = (int(ox_s - dx * diag), int(oy_s - dy * diag))
+        p2_s = (int(ox_s + dx * diag), int(oy_s + dy * diag))
+        
+        # Center of the blur line
+        ox_b, oy_b = cx + nx * line_info['total'], cy + ny * line_info['total']
+        p1_b = (int(ox_b - dx * diag), int(oy_b - dy * diag))
+        p2_b = (int(ox_b + dx * diag), int(oy_b + dy * diag))
+        
+        draw_dashed_fast(p1_s, p2_s, (255, 255, 255), 2)
+        cv2.line(overlay, p1_b, p2_b, (255, 255, 255), 2)
 
-    # --- Lower Side (Negative) ---
-    # Dashed (Sharp Limit)
-    p1, p2 = get_line_pts(-settings.lower_sharp)
-    draw_dashed(p1, p2)
-    # Solid (Blur Limit)
-    p1, p2 = get_line_pts(-(settings.lower_sharp + settings.lower_trans))
-    cv2.line(overlay, p1, p2, (255, 255, 255), 2)
+    # Helper: Point Drawing
+    def draw_point(pos, color, is_active):
+        radius = 8 if is_active else 6
+        thick = 3 if is_active else 1
+        cv2.circle(overlay, pos, radius, color, -1)
+        cv2.circle(overlay, pos, radius+2, (255, 255, 255), thick)
 
-    # --- Interactive Points ---
-    # Center (Red)
-    cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
+    # 1. Center
+    draw_point((cx, cy), (0, 0, 255), active_node == "center")
     
-    # Handles (Blue)
+    # 2. Handles
     h_pos = definer.get_handles_pos()
+    draw_point(h_pos[0], (255, 0, 0), active_node == "up")
+    draw_point(h_pos[1], (255, 0, 0), active_node == "down")
     
-    # Handle 1 (Upper)
-    cv2.circle(overlay, h_pos[0], 6, (255, 0, 0), -1) # Blue filled
-    cv2.circle(overlay, h_pos[0], 8, (255, 255, 255), 1) # White border
-    
-    # Handle 2 (Lower)
-    cv2.circle(overlay, h_pos[1], 6, (255, 0, 0), -1) # Blue filled
-    cv2.circle(overlay, h_pos[1], 8, (255, 255, 255), 1) # White border
-
     return overlay

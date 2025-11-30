@@ -3,22 +3,21 @@ from dataclasses import dataclass
 @dataclass
 class MiniatureSettings:
     """
-    Data model for Asymmetric Tilt-Shift.
-    Upper = Direction of the Normal Vector (Side A)
-    Lower = Opposite Direction (Side B)
+    Data model for Fully Independent Tilt-Shift.
+    Upper and Lower boundaries have their own Angles and Distances.
     """
-    # Geometry
     center_x: float = 0.5
     center_y: float = 0.5
-    angle_degree: float = 0.0
     
-    # Side A (Upper / Positive Normal)
-    upper_sharp: int = 100      # Distance from center to first dashed line
-    upper_trans: int = 150      # Distance from dashed to solid line
+    # Side A (Upper)
+    angle_upper: float = 0.0    # Angle for the top line
+    dist_upper_sharp: int = 50 # Distance to sharp line
+    dist_upper_trans: int = 100 # Width of fade zone
     
-    # Side B (Lower / Negative Normal)
-    lower_sharp: int = 100      # Distance from center to first dashed line
-    lower_trans: int = 150      # Distance from dashed to solid line
+    # Side B (Lower)
+    angle_lower: float = 180.0  # Angle for the bottom line (default opposite)
+    dist_lower_sharp: int = 50
+    dist_lower_trans: int = 100
     
     # Visuals
     saturation: float = 1.0
