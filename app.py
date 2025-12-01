@@ -31,7 +31,7 @@ class LocalMiniatureApp:
         self.cache_sharp = None
         self.cache_blur = None
         self.blur_strength = 50
-        self.window_name = "Fast Independent Tilt-Shift"
+        self.window_name = "Miniature"
         
         # Interaction Flags
         self.drag_center = False
@@ -39,16 +39,18 @@ class LocalMiniatureApp:
         self.drag_handle_down = False
         self.active_node = None
         
-        # Prepare initial layers
+        # Prepare initial layers, normally we only do once this computation
         self.update_layers()
 
     def update_layers(self):
+        """Computation of blur : please check processing.py for the function"""
         """Re-computes heavy operations only when necessary."""
         self.cache_sharp = ImageToolbox.apply_enhancements(self.raw_img, self.settings.saturation, self.settings.contrast)
         self.cache_blur = ImageToolbox.apply_blur_style(self.cache_sharp, self.blur_strength, "gaussian")
 
     def on_mouse(self, event, x, y, flags, param):
-        """Handles Mouse Events: Click, Drag, Hover."""
+        """Mouse Events: Click, Drag, Hover."""
+        """NOT VERY IMPORTANT... pure programminng"""
         
         # Convert Center to pixels
         cx = int(self.settings.center_x * self.cols)
@@ -128,9 +130,6 @@ class LocalMiniatureApp:
         
         # UI Controls
         cv2.createTrackbar("Blur", self.window_name, 50, 100, nothing)
-        # Sliders to control the "Fixed" transition widths
-        # cv2.createTrackbar("Fade Up", self.window_name, self.settings.dist_upper_trans, 500, nothing)
-        # cv2.createTrackbar("Fade Down", self.window_name, self.settings.dist_lower_trans, 500, nothing)
 
         print("--- Instructions ---")
         print("1. Drag Red Dot: Move Focus Center.")
@@ -141,17 +140,20 @@ class LocalMiniatureApp:
         while True:
             # Sync Trackbar values
             self.blur_strength = cv2.getTrackbarPos("Blur", self.window_name)
-        
             
-            # Update cache if blur strength changed significantly
+            # Update cache if blur strength changed
+            # This is a heavy computation and only occurs when blur_strength changes
             if hasattr(self, '_last_b') and self._last_b != self.blur_strength:
                 self.update_layers()
             self._last_b = self.blur_strength
 
-            # 1. Composite (Fast 0.1x downscaling)
+            # 1. Composite : check processing.py
+            # finsl image = composition of 2 images :
+            # image clear (zone sharp) and image blurred (zone blurred), which are already computed using update_layers()
+            # finally zone itermdeiate = real time interpolation of sharp and blurred
             res = render_composite(self.cache_sharp, self.cache_blur, self.settings)
             
-            # 2. Draw Guides
+            # 2. Draw Guides : check processing.py
             final = draw_guides_cv2(res, self.settings, active_node=self.active_node)
             
             # 3. Display

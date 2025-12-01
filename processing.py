@@ -8,10 +8,11 @@ class ImageToolbox:
     @staticmethod
     def apply_enhancements(image: np.ndarray, saturation: float, contrast: float) -> np.ndarray:
         """Applies Saturation and Contrast."""
+        """This is an optional operation"""
         img = image.copy()
         if saturation != 1.0:
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype("float32")
-            (h, s, v) = cv2.split(hsv)
+            (h, s, v) = cv2.split(hsv) #color/ saturation/ lightness
             s = np.clip(s * saturation, 0, 255)
             img = cv2.cvtColor(cv2.merge([h, s, v]).astype("uint8"), cv2.COLOR_HSV2BGR)
         
@@ -23,8 +24,8 @@ class ImageToolbox:
     def apply_blur_style(image: np.ndarray, level: int, shape: str) -> np.ndarray:
         """Generates blurred image."""
         if level <= 0: return image.copy()
-        mapped = max(1, int(level / 2))
-        k_size = min(mapped * 2 + 1, 101)
+        rescaled_level = max(1, int(level / 2)) #level : 0~100 for user
+        k_size = min(rescaled_level * 2 + 1, 101)
 
         if shape == "gaussian":
             return cv2.GaussianBlur(image, (k_size, k_size), 0)
@@ -34,17 +35,18 @@ class ImageToolbox:
 
 
 class TiltShiftZoneDefiner:
+    """The class decides for each pixel whether it should be clear/blurred/intermediate"""
     def __init__(self, shape: Tuple[int, ...], settings: MiniatureSettings):
-        self.rows, self.cols = shape[:2]
-        self.settings = settings
-        self.cx = int(settings.center_x * self.cols)
-        self.cy = int(settings.center_y * self.rows)
+        self.rows, self.cols = shape[:2] # real image size
+        self.settings = settings # center is (0.5,0.5) by default
+        self.cx = int(settings.center_x * self.cols) # get the center (axis x) of the image
+        self.cy = int(settings.center_y * self.rows) # get the center (axis y) of the image
 
     def _get_vectors(self, angle_deg):
         """Helper to get direction and normal vectors from an angle."""
         theta = np.deg2rad(angle_deg)
-        # Normal vector (perpendicular to the cut line)
-        # We assume the 'handle' represents the Normal direction
+        # Normal vector (perpendicular to the zone line and it points to the blurred zone)
+        # We assume the 'handle blue point' represents the Normal direction
         nx = np.cos(theta)
         ny = np.sin(theta)
         return nx, ny
@@ -54,49 +56,62 @@ class TiltShiftZoneDefiner:
         Calculates the mask with Downscaling Optimization.
         Result is upscaled back to original size.
         """
+        
+        """The following code generate X,Y"""
+        """X,Y : Contain the coordinates of all points"""
+        """So that in the futur : """
+        """we dont need to loop on x and y to compute one by one the distance to each (x,y)"""
+        """+ downscaling => Big acceleration !"""
         # 1. Determine calculation grid size (Low Res)
         calc_rows = int(self.rows * downscale_factor)
         calc_cols = int(self.cols * downscale_factor)
         
-        # 2. Scale geometry parameters to low res
+        # 2. Scale geometry parameters to low resolution
         scale_cx = self.cx * downscale_factor
         scale_cy = self.cy * downscale_factor
         
         X, Y = np.meshgrid(np.arange(calc_cols), np.arange(calc_rows))
         
-        # --- Logic: Intersection of two half-planes ---
-        
+        """Logic: Intersection of two half-planes"""
         # Part A: Upper Boundary
         # Calculate distance to the Upper Line
-        nx_up, ny_up = self._get_vectors(self.settings.angle_upper)
-        # Project vector from center to pixel onto the normal vector
-        # Dist > 0 means we are "past" the line (into the blur zone)
+        # Project the vector (from center to pixel) onto the normal vector :
+        # dotprod(dist_center_to_point, normal of upper line)
+        # Note that the logic way is to :
+        # Project the vector (from a point of upper line to pixel) onto the upper normal vector.
+        # But later we are going to adjust this problem
+        nx_up, ny_up = self._get_vectors(self.settings.angle_upper) # get the upper nomal
         dist_up = (X - scale_cx) * nx_up + (Y - scale_cy) * ny_up
         
-        # Part B: Lower Boundary
+        # Part B: Lower Boundary, doing the same
         nx_low, ny_low = self._get_vectors(self.settings.angle_lower)
         dist_low = (X - scale_cx) * nx_low + (Y - scale_cy) * ny_low
         
-        # Initialize Mask as 1.0 (Sharp)
+        """Compute the blurring/ decay factor of each zone """
+        """0 : blurred, 1 : sharp, 0~1 : decay (what we want to compute) """
+        # Initialize Mask as 1.0 (all clear)
         mask = np.ones((calc_rows, calc_cols), dtype=np.float32)
-        
         def apply_decay(dist_field, sharp_lim, trans_lim):
-            # Scale limits to low res
+            # sharp_lim : dist to sharp line
+            # trans_lim : dist to intermdediate line
+            # Scale limits to low resolution (since we used the downscaling)
             s_sharp = sharp_lim * downscale_factor
             s_trans = trans_lim * downscale_factor
             
-            # Identify pixels that are too far
-            # We only care about positive distance (direction of the handle)
+            # Identify different zones : intermed zone and blur zone
+            # No need for sharp zone : assuming sharp initially
             cond_trans = (dist_field > s_sharp) & (dist_field < (s_sharp + s_trans))
             cond_blur = (dist_field >= (s_sharp + s_trans))
             
-            # Apply gradients
+            # cmputation of decay !!!!!!!! Linear interpolation !!!
+            # 1 - (dist_to_pixel - lower bound)/ upper bound
+            # we take the min in case upper and lower lines have intersection
             if s_trans > 0:
                 mask[cond_trans] = np.minimum(mask[cond_trans], 1.0 - (dist_field[cond_trans] - s_sharp) / s_trans)
             
             mask[cond_blur] = 0.0
 
-        # Apply constraints from both lines
+        # Apply constraints from both upper and lower lines
         apply_decay(dist_up, self.settings.dist_upper_sharp, self.settings.dist_upper_trans)
         apply_decay(dist_low, self.settings.dist_lower_sharp, self.settings.dist_lower_trans)
         
@@ -105,7 +120,7 @@ class TiltShiftZoneDefiner:
         return full_mask
 
     def get_handles_pos(self) -> List[Tuple[int, int]]:
-        """Returns positions for drawing handles."""
+        """Returns positions for drawing blue point handles."""
         # Handle 1 (Upper)
         nx_up, ny_up = self._get_vectors(self.settings.angle_upper)
         dist_up = self.settings.dist_upper_sharp
@@ -119,7 +134,7 @@ class TiltShiftZoneDefiner:
         return [h1, h2]
 
     def get_lines_geometry(self):
-        """Helper to return lines data for drawing."""
+        """Returns lines data for drawing."""
         res = []
         for (angle, d_sharp, d_trans) in [
             (self.settings.angle_upper, self.settings.dist_upper_sharp, self.settings.dist_upper_trans),
@@ -136,18 +151,19 @@ class TiltShiftZoneDefiner:
             })
         return res
 
-
+""" After having the different zone : we do the rendering ! """
 def render_composite(img_sharp: np.ndarray, img_blur: np.ndarray, settings: MiniatureSettings) -> np.ndarray:
     definer = TiltShiftZoneDefiner(img_sharp.shape, settings)
-    # Use downscale optimization here!
-    mask = definer.compute_mask(downscale_factor=0.25)
+    mask = definer.compute_mask(downscale_factor=0.1)
     
-    mask_3ch = cv2.merge([mask, mask, mask])
-    # Fast blending
+    mask_3ch = cv2.merge([mask, mask, mask]) #same mask for RGB
+    
+    # We apply the mask on the image : Another linear interpolation !
+    # For each pixel (x,y) : rgb = sharp_rgb * mask + blur_rgb * (1-mask)
     result = img_sharp * mask_3ch + img_blur * (1 - mask_3ch)
     return result.astype("uint8")
 
-
+"""Draw guide lines : NOT VERY IMPORTANT"""
 def draw_guides_cv2(image: np.ndarray, settings: MiniatureSettings, active_node: str = None) -> np.ndarray:
     overlay = image.copy()
     h, w = overlay.shape[:2]
