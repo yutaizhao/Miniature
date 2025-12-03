@@ -118,6 +118,33 @@ class TiltShiftZoneDefiner:
         # 3. Upscale mask to full resolution (Linear interpolation is fast and smooth enough)
         full_mask = cv2.resize(mask, (self.cols, self.rows), interpolation=cv2.INTER_LINEAR)
         return full_mask
+        
+    def compute_split_mask(self, downscale_factor=0.1) -> np.ndarray:
+        """
+        [NEW] Calculates a binary mask to distinguish Upper vs Lower regions.
+        Result: 1.0 = Belongs to Upper Blur; 0.0 = Belongs to Lower Blur.
+        """
+        calc_rows = int(self.rows * downscale_factor)
+        calc_cols = int(self.cols * downscale_factor)
+        scale_cx = self.cx * downscale_factor
+        scale_cy = self.cy * downscale_factor
+        
+        X, Y = np.meshgrid(np.arange(calc_cols), np.arange(calc_rows))
+        
+        # Calculate projection distance for both vectors
+        nx_up, ny_up = self._get_vectors(self.settings.angle_upper)
+        dist_up = (X - scale_cx) * nx_up + (Y - scale_cy) * ny_up
+        
+        nx_low, ny_low = self._get_vectors(self.settings.angle_lower)
+        dist_low = (X - scale_cx) * nx_low + (Y - scale_cy) * ny_low
+        
+        # Logic: Whichever direction has a larger positive projection distance wins.
+        # This effectively splits the image into two halves based on the handles.
+        split_map = (dist_up > dist_low).astype(np.float32)
+        
+        # Resize to full resolution (Nearest Neighbor is fine for binary split)
+        full_split = cv2.resize(split_map, (self.cols, self.rows), interpolation=cv2.INTER_NEAREST)
+        return full_split
 
     def get_handles_pos(self) -> List[Tuple[int, int]]:
         """Returns positions for drawing blue point handles."""
@@ -161,6 +188,32 @@ def render_composite(img_sharp: np.ndarray, img_blur: np.ndarray, settings: Mini
     # We apply the mask on the image : Another linear interpolation !
     # For each pixel (x,y) : rgb = sharp_rgb * mask + blur_rgb * (1-mask)
     result = img_sharp * mask_3ch + img_blur * (1 - mask_3ch)
+    return result.astype("uint8")
+    
+def render_composite_adv(img_sharp: np.ndarray,
+                          img_blur_up: np.ndarray,
+                          img_blur_low: np.ndarray,
+                          settings: MiniatureSettings) -> np.ndarray:
+    """
+    [NEW] Advanced Rendering Pipeline.
+    Blends: Sharp Image + Upper Blur Image + Lower Blur Image.
+    """
+    definer = TiltShiftZoneDefiner(img_sharp.shape, settings)
+    
+    # 1. Compute Blur Mask (0 to 1) : unchnaged like before
+    mask_sharpness = definer.compute_mask(downscale_factor=0.1)
+    
+    # 2. Compute Split Mask (0 or 1)
+    mask_split = definer.compute_split_mask(downscale_factor=0.1)
+    
+    # 3. Expand masks to 3 channels for RGB math
+    mask_s_3ch = cv2.merge([mask_sharpness, mask_sharpness, mask_sharpness])
+    mask_split_3ch = cv2.merge([mask_split, mask_split, mask_split])
+    
+    # 4. Composition
+    combined_blur = img_blur_up * mask_split_3ch + img_blur_low * (1 - mask_split_3ch)
+    result = img_sharp * mask_s_3ch + combined_blur * (1 - mask_s_3ch)
+    
     return result.astype("uint8")
 
 """Draw guide lines : NOT VERY IMPORTANT"""

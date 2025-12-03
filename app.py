@@ -3,7 +3,7 @@ import numpy as np
 import math
 
 from models import MiniatureSettings
-from processing import ImageToolbox, render_composite, draw_guides_cv2, TiltShiftZoneDefiner
+from processing import ImageToolbox, render_composite, render_composite_adv, draw_guides_cv2, TiltShiftZoneDefiner
 
 class LocalMiniatureApp:
     def __init__(self, image_path: str):
@@ -27,10 +27,13 @@ class LocalMiniatureApp:
             saturation=1.4, contrast=1.1
         )
         
-        # Cache for performance
+        # 3 Images !!!
         self.cache_sharp = None
-        self.cache_blur = None
-        self.blur_strength = 50
+        self.cache_blur_up = None   # Blur layer for the Upper side
+        self.cache_blur_low = None  # Blur layer for the Lower side
+        
+        self.blur_str_up = 50
+        self.blur_str_low = 50
         self.window_name = "Miniature"
         
         # Interaction Flags
@@ -45,8 +48,18 @@ class LocalMiniatureApp:
     def update_layers(self):
         """Computation of blur : please check processing.py for the function"""
         """Re-computes heavy operations only when necessary."""
-        self.cache_sharp = ImageToolbox.apply_enhancements(self.raw_img, self.settings.saturation, self.settings.contrast)
-        self.cache_blur = ImageToolbox.apply_blur_style(self.cache_sharp, self.blur_strength, "gaussian")
+        # 1. Generate Sharp Base
+        self.cache_sharp = ImageToolbox.apply_enhancements(
+            self.raw_img, self.settings.saturation, self.settings.contrast
+        )
+        # 2. Generate Upper Blur
+        self.cache_blur_up = ImageToolbox.apply_blur_style(
+            self.cache_sharp, self.blur_str_up, "gaussian"
+        )
+        # 3. Generate Lower Blur
+        self.cache_blur_low = ImageToolbox.apply_blur_style(
+            self.cache_sharp, self.blur_str_low, "gaussian"
+        )
 
     def on_mouse(self, event, x, y, flags, param):
         """Mouse Events: Click, Drag, Hover."""
@@ -129,7 +142,8 @@ class LocalMiniatureApp:
         def nothing(x): pass
         
         # UI Controls
-        cv2.createTrackbar("Blur", self.window_name, 50, 100, nothing)
+        cv2.createTrackbar("Blur UP", self.window_name, 50, 100, nothing)
+        cv2.createTrackbar("Blur LOW", self.window_name, 50, 100, nothing)
 
         print("--- Instructions ---")
         print("1. Drag Red Dot: Move Focus Center.")
@@ -139,19 +153,33 @@ class LocalMiniatureApp:
 
         while True:
             # Sync Trackbar values
-            self.blur_strength = cv2.getTrackbarPos("Blur", self.window_name)
+            new_blur_up = cv2.getTrackbarPos("Blur UP", self.window_name)
+            new_blur_low = cv2.getTrackbarPos("Blur LOW", self.window_name)
             
-            # Update cache if blur strength changed
-            # This is a heavy computation and only occurs when blur_strength changes
-            if hasattr(self, '_last_b') and self._last_b != self.blur_strength:
+            # Check if we need to re-calculate heavy layers
+            # Only update if the specific blur strength changed
+            need_update = False
+            if new_blur_up != self.blur_str_up:
+                self.blur_str_up = new_blur_up
+                need_update = True
+            if new_blur_low != self.blur_str_low:
+                self.blur_str_low = new_blur_low
+                need_update = True
+            
+            if need_update:
                 self.update_layers()
-            self._last_b = self.blur_strength
 
-            # 1. Composite : check processing.py
-            # finsl image = composition of 2 images :
-            # image clear (zone sharp) and image blurred (zone blurred), which are already computed using update_layers()
+            # Composite : check processing.py
+            # finsl image = composition of 3 images :
+            # image clear (zone sharp) and 2 images blurred (up/low zones blurred),
+            # which are already computed using update_layers()
             # finally zone itermdeiate = real time interpolation of sharp and blurred
-            res = render_composite(self.cache_sharp, self.cache_blur, self.settings)
+            res = render_composite_adv(
+                self.cache_sharp,
+                self.cache_blur_up,
+                self.cache_blur_low,
+                self.settings
+            )
             
             # 2. Draw Guides : check processing.py
             final = draw_guides_cv2(res, self.settings, active_node=self.active_node)

@@ -1,0 +1,60 @@
+// Tilt-Shift Algorithm Block Diagram
+digraph {
+	dpi=300 nodesep=0.6 rankdir=TB ranksep=0.6 size="15,20" splines=ortho
+	node [fontname=Helvetica shape=rect style=filled]
+	edge [fontsize=10]
+	subgraph cluster_input {
+		color=grey label=Inputs style=dashed
+		rank=same
+		Img [label="Initial Image
+(I_init)" fillcolor="#E1F5FE"]
+		Settings [label="Settings
+(Angle, Trans&Blur Limits Distances
+/ Center Position)" fillcolor="#E1F5FE"]
+	}
+	subgraph cluster_blur {
+		color=blue label="Blur Pipeline"
+		BlurAlgo [label="Gaussian Blur" fillcolor="#FFF9C4"]
+		ImgBlur [label="Blurred Image
+(I_blur)" fillcolor="#FFCCBC"]
+	}
+	subgraph cluster_zone {
+		color=green label="Zone Definition Pipeline"
+		Downscale [label="Downscale Grid (X,Y)" fillcolor="#C8E6C9"]
+		Vectors [label="Vector Calculation
+(Normal vector of the limit)" fillcolor="#C8E6C9"]
+		DotProd [label="Distance of all points(X,Y)
+(Distance from center to point projected on normal)" fillcolor="#C8E6C9"]
+		Zones [label="Trans and Blur Zones 
+(Compare point dist and limits)" fillcolor="#FFCCBC"]
+	}
+	subgraph cluster_mask {
+		color=red label="Mask Pipeline"
+		Decay [label="Decay in Trans Zone
+(Decay Rate = 1-(point dist-Trans lim)/Blur lim)" fillcolor="#C8E6C9"]
+		Upscale [label="Upscale Mask
+(Linear Interpolation)" fillcolor="#C8E6C9"]
+		Mask [label="Full Mask (M)" fillcolor="#FFCCBC"]
+	}
+	subgraph cluster_output {
+		label=Compositing style=dashed
+		Blend [label="Linear Blending
+I = I_sharp*M + I_blur*(1-M)" fillcolor="#D1C4E9" shape=diamond]
+		Result [label="Final Miniature
+Image" fillcolor="#B3E5FC" shape=doubleoctagon style="filled,bold"]
+	}
+	Img -> BlurAlgo [headport=n tailport=s]
+	BlurAlgo -> ImgBlur [headport=n tailport=s]
+	Img -> Downscale [label="Image shape"]
+	Downscale -> DotProd [label="Grid (X,Y)" headport=n tailport=s]
+	Settings -> Vectors [label=Angle headport=n tailport=s]
+	Vectors -> DotProd [label=normal headport=n tailport=s]
+	DotProd -> Zones [label="Point Dist" headport=n tailport=s]
+	Zones -> Decay [label="Marices of Bool" headport=n tailport=s]
+	Decay -> Upscale [label="Downscaled Mask" headport=n tailport=s]
+	Upscale -> Mask [headport=n tailport=s]
+	ImgBlur -> Blend [label=I_blur headport=ne tailport=s]
+	Img -> Blend [label=I_init headport=ne tailport=e]
+	Mask -> Blend [label=M headport=n tailport=s]
+	Blend -> Result [headport=n tailport=s]
+}
